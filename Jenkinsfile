@@ -65,10 +65,37 @@ pipeline {
             }
         }
 
-        // >>> [ZAP]: aquí van las etapas "Deploy Staging" y "DAST - OWASP ZAP"
+        stage('Deploy Staging') {
+            steps {
+                sh 'bash scripts/deploy.sh staging 5001'
+            }
+        }
+
+        stage('DAST - OWASP ZAP') {
+            steps {
+                script {
+                    // zap_scan.py termina con 2 si hay alertas High/Medium. Guardamos el estado
+                    // y marcamos el build UNSTABLE, pero seguimos para archivar los reportes.
+                    def estado = sh(returnStatus: true, script: 'python3 scripts/zap_scan.py http://jenkins:5001')
+                    env.ZAP_ESTADO = "${estado}"
+                    echo "ZAP terminó con código ${estado} (0 = sin High/Medium, 2 = hay High/Medium)"
+                    if (estado == 2) {
+                        currentBuild.result = 'UNSTABLE'
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/zap-*', allowEmptyArchive: true
+                }
+            }
+        }
 
         stage('Deploy Producción') {
-            // >>> [GATE]: aquí va la condición "when" que protege producción
+            // El gate evita desplegar si ZAP encontró High/Medium en staging.
+            when {
+                expression { env.ZAP_ESTADO == '0' }
+            }
             steps {
                 sh 'bash scripts/deploy.sh produccion 5000'
                 script { env.PRODUCCION = env.APP_VERSION }
