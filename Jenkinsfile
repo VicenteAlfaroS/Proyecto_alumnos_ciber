@@ -49,7 +49,21 @@ pipeline {
             }
         }
 
-        // >>> [SEGURIDAD]: aquí van las etapas "Security Review (SAST)" y "Dependency Management"
+        stage('Security Review (SAST)') {
+            steps {
+                // Bandit ya viene instalado en la imagen de Jenkins (laboratorio/jenkins/Dockerfile)
+                sh 'bandit app.py -f json > reports/bandit.json || true'
+                sh 'bandit app.py > reports/bandit.txt || true'
+            }
+        }
+
+        stage('Dependency Management (SCA)') {
+            steps {
+                // pip-audit ya viene instalado en la imagen de Jenkins
+                sh 'pip-audit -r requirements.txt --format json > reports/pip-audit.json || true'
+                sh 'pip-audit -r requirements.txt > reports/pip-audit.txt || true'
+            }
+        }
 
         // >>> [ZAP]: aquí van las etapas "Deploy Staging" y "DAST - OWASP ZAP"
 
