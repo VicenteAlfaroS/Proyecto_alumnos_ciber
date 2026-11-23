@@ -27,6 +27,9 @@ ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH") or generate_password
     secrets.token_urlsafe(24)
 )
 app.config["SECRET_KEY"] = SECRET_KEY
+## VULN-04b: la cookie de sesión no debe enviarse en contextos cross-site (ZAP Low).
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
 
 ## Versión desplegada: la inyecta el pipeline (1.0.<build>+<commit>). Sirve para la trazabilidad.
 VERSION = os.environ.get("APP_VERSION", "dev")
@@ -145,12 +148,16 @@ def despues_de_la_peticion(respuesta):
         HTTP_PETICIONES.labels(request.method, endpoint, str(respuesta.status_code)).inc()
         HTTP_LATENCIA.labels(endpoint).observe(time.perf_counter() - g.get("inicio", time.perf_counter()))
 
-    # VULN-04: cabeceras de seguridad (ZAP: CSP, clickjacking, MIME sniffing).
+    # VULN-04b: form-action NO hereda de default-src; declararlo explícitamente
+    # evita el hallazgo Medium de ZAP "CSP: Failure to Define Directive with No Fallback".
     respuesta.headers.setdefault("X-Content-Type-Options", "nosniff")
     respuesta.headers.setdefault("X-Frame-Options", "DENY")
     respuesta.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        (
+            "default-src 'self'; script-src 'self'; object-src 'none'; "
+            "base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+        ),
     )
     respuesta.headers.setdefault("Referrer-Policy", "no-referrer")
     return respuesta
