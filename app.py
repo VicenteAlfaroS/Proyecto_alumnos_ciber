@@ -11,7 +11,7 @@ import secrets
 import sqlite3
 import time
 
-from flask import Flask, Response, g, jsonify, render_template_string, request
+from flask import Flask, Response, g, jsonify, render_template_string, request, session
 from markupsafe import escape
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -56,6 +56,11 @@ PATRONES_ATAQUE = {
     "path_traversal": re.compile(r"\.\./|\.\.\\|%2e%2e", re.I),
 }
 
+## VULN-04: límite de intentos de login (fuerza bruta).
+INTENTOS_LOGIN = {}
+LIMITE_LOGIN = 10
+VENTANA_LOGIN = 60
+
 PORTADA = """<!doctype html>
 <html lang="es">
 <head><meta charset="utf-8"><title>Sistema Alumnos</title></head>
@@ -73,6 +78,7 @@ PORTADA = """<!doctype html>
 </form>
 <h2>Acceso administrador</h2>
 <form action="/login" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input name="usuario" value="admin"> <input name="clave" type="password" value="">
   <button type="submit">Entrar</button>
 </form>
@@ -138,6 +144,15 @@ def despues_de_la_peticion(respuesta):
     if endpoint != "/metrics":
         HTTP_PETICIONES.labels(request.method, endpoint, str(respuesta.status_code)).inc()
         HTTP_LATENCIA.labels(endpoint).observe(time.perf_counter() - g.get("inicio", time.perf_counter()))
+
+    # VULN-04: cabeceras de seguridad (ZAP: CSP, clickjacking, MIME sniffing).
+    respuesta.headers.setdefault("X-Content-Type-Options", "nosniff")
+    respuesta.headers.setdefault("X-Frame-Options", "DENY")
+    respuesta.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+    )
+    respuesta.headers.setdefault("Referrer-Policy", "no-referrer")
     return respuesta
 
 
@@ -147,7 +162,9 @@ def portada():
     @brief Portada HTML con enlaces y formularios del sistema.
     @return Página HTML.
     """
-    return render_template_string(PORTADA, version=VERSION)
+    token = session.get("csrf_token") or secrets.token_urlsafe(32)
+    session["csrf_token"] = token
+    return render_template_string(PORTADA, version=VERSION, csrf_token=token)
 
 
 @app.route("/hello")
@@ -226,13 +243,30 @@ def login():
     @brief Valida las credenciales del administrador enviadas por formulario.
     @return JSON con el resultado; 401 si las credenciales no son válidas.
     """
+    # VULN-04: validar token anti-CSRF (CWE-352).
+    token = request.form.get("csrf_token", "")
+    esperado = session.get("csrf_token", "")
+    if not esperado or not secrets.compare_digest(token, esperado):
+        return jsonify({"error": "Token CSRF inválido"}), 403
+
+    # VULN-04: limitar intentos por IP (fuerza bruta).
+    ip = request.remote_addr or "desconocida"
+    ahora = time.time()
+    recientes = [t for t in INTENTOS_LOGIN.get(ip, []) if ahora - t < VENTANA_LOGIN]
+    if len(recientes) >= LIMITE_LOGIN:
+        app.logger.warning("Login bloqueado por exceso de intentos desde %s", ip)
+        return jsonify({"error": "Demasiados intentos, intente más tarde"}), 429
+    recientes.append(ahora)
+    INTENTOS_LOGIN[ip] = recientes
+
     usuario = request.form.get("usuario", "")
     clave = request.form.get("clave", "")
     if usuario == ADMIN_USUARIO and check_password_hash(ADMIN_PASSWORD_HASH, clave):
+        INTENTOS_LOGIN.pop(ip, None)
         LOGIN_EXITOSOS.inc()
         return jsonify({"mensaje": "Bienvenido, administrador"})
     LOGIN_FALLIDOS.inc()
-    app.logger.warning("Login fallido para el usuario '%s' desde %s", usuario, request.remote_addr)
+    app.logger.warning("Login fallido para el usuario '%s' desde %s", usuario, ip)
     return jsonify({"error": "Credenciales inválidas"}), 401
 
 
@@ -248,4 +282,4 @@ def metrics():
 iniciar_db()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host=os.environ.get("APP_HOST", "127.0.0.1"), port=5000, debug=False)
